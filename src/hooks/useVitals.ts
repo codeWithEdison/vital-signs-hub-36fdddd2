@@ -105,18 +105,34 @@ export function useVitals() {
           }
 
           if (MODEL_API_URL) {
-            void fetch(`${MODEL_API_URL.replace(/\/$/, "")}/predict-and-persist`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                vital_id: inserted.id,
-                temperature: inserted.temperature,
-                heart_rate: inserted.heart_rate,
-                spo2: inserted.spo2,
-              }),
-            }).catch((error) => {
-              console.error("Model API request failed:", error);
-            });
+            void (async () => {
+              try {
+                const res = await fetch(`${MODEL_API_URL.replace(/\/$/, "")}/predict`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    temperature: inserted.temperature,
+                    heart_rate: inserted.heart_rate,
+                    spo2: inserted.spo2,
+                  }),
+                });
+                if (!res.ok) throw new Error(`predict failed: ${res.status}`);
+                const prediction = await res.json();
+                const { error } = await supabase.functions.invoke("persist-vital", {
+                  body: {
+                    vital_id: inserted.id,
+                    model_status: prediction.model_status,
+                    final_status: prediction.final_status,
+                    model_confidence: prediction.model_confidence,
+                    decision_source: prediction.decision_source,
+                    recommendation: prediction.recommendation,
+                  },
+                });
+                if (error) throw error;
+              } catch (error) {
+                console.error("Model prediction pipeline failed:", error);
+              }
+            })();
           }
         }
       )
