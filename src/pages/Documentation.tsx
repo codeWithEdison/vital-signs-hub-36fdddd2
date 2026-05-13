@@ -1,10 +1,11 @@
 import { Link } from "react-router-dom";
-import { ArrowLeft, Cpu, Activity, Thermometer, Heart, Wind, FileDown } from "lucide-react";
+import { ArrowLeft, Cpu, Activity, Thermometer, Heart, Wind, FileDown, FileText, Loader2 } from "lucide-react";
 import logo from "@/assets/logo.png";
 import { Button } from "@/components/ui/button";
 import { useVitals } from "@/hooks/useVitals";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { evaluateHealth, type HealthStatus } from "@/lib/healthLogic";
+import { downloadSensorDocumentationWord } from "@/lib/documentationWordExport";
 
 /* ── Correlation helper ── */
 function pearson(x: number[], y: number[]): number {
@@ -30,6 +31,7 @@ function corrLabel(r: number) {
 
 export default function Documentation() {
   const { records } = useVitals();
+  const [wordExporting, setWordExporting] = useState(false);
 
   const stats = useMemo(() => {
     if (!records.length) return null;
@@ -124,6 +126,31 @@ export default function Documentation() {
             <span className="font-display font-bold text-foreground">Sick-Bay Kiosk</span>
           </div>
           <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1.5 text-xs"
+              disabled={wordExporting}
+              onClick={async () => {
+                setWordExporting(true);
+                try {
+                  await downloadSensorDocumentationWord(stats);
+                } catch (e) {
+                  console.error("Word export failed:", e);
+                } finally {
+                  setWordExporting(false);
+                }
+              }}
+            >
+              {wordExporting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <FileText className="w-3.5 h-3.5" />
+              )}
+              <span className="hidden sm:inline">Download Word</span>
+              <span className="sm:hidden">Word</span>
+            </Button>
             <Button
               type="button"
               variant="outline"
