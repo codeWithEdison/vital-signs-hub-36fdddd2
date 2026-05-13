@@ -1,119 +1,244 @@
-// Persists model prediction results to public.vitals.
-// Uses SUPABASE_SERVICE_ROLE_KEY (auto-injected by Lovable Cloud) so the
-// service role key never has to live on a developer's laptop.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
-import { createClient } from "npm:@supabase/supabase-js@2";
+type HealthStatus =
+  | "SAFE"
+  | "OBSERVE"
+  | "WARNING"
+  | "ALERT"
+  | "CRITICAL"
+  | "INVALID";
 
-const corsHeaders = {
+interface ModelWeights {
+  classes: string[];
+  feature_names: string[];
+  scaler_mean: number[];
+  scaler_scale: number[];
+  coef: number[][];
+  intercept: number[];
+}
+
+const weights: ModelWeights = JSON.parse(
+  Deno.readTextFileSync(new URL("./model_inference.json", import.meta.url)),
+);
+
+const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-interface PersistPayload {
-  vital_id: string;
-  model_status: string;
-  final_status: string;
-  model_confidence: number;
-  decision_source: string;
-  recommendation: string;
+function evaluateHealth(
+  temperature: number,
+  heart_rate: number,
+  spo2: number,
+): { status: HealthStatus; recommendation: string } {
+  const invalidReading =
+    !Number.isFinite(temperature) ||
+    !Number.isFinite(heart_rate) ||
+    !Number.isFinite(spo2) ||
+    temperature < 30 ||
+    temperature > 45 ||
+    heart_rate < 30 ||
+    heart_rate > 220 ||
+    spo2 < 70 ||
+    spo2 > 100;
+
+  if (invalidReading) {
+    return {
+      status: "INVALID",
+      recommendation: "Invalid sensor reading. Please retake measurement",
+    };
+  }
+
+  if (spo2 < 90 || temperature >= 39.5 || heart_rate >= 140) {
+    return {
+      status: "CRITICAL",
+      recommendation: "Seek emergency care immediately",
+    };
+  }
+  if (temperature > 38 || spo2 < 94) {
+    return {
+      status: "ALERT",
+      recommendation: "Visit the clinic immediately",
+    };
+  }
+  if (heart_rate > 100) {
+    return {
+      status: "WARNING",
+      recommendation: "Rest and monitor your condition",
+    };
+  }
+  if (
+    (temperature >= 37.3 && temperature <= 38.0) ||
+    (heart_rate >= 95 && heart_rate <= 100) ||
+    (spo2 >= 94 && spo2 <= 95)
+  ) {
+    return {
+      status: "OBSERVE",
+      recommendation: "Recheck your vitals soon and continue observing",
+    };
+  }
+  return {
+    status: "SAFE",
+    recommendation: "You are in good health",
+  };
 }
 
-function isUuid(v: unknown): v is string {
-  return (
-    typeof v === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)
+function softmax(logits: number[]): number[] {
+  const m = Math.max(...logits);
+  const ex = logits.map((z) => Math.exp(z - m));
+  const s = ex.reduce((a, b) => a + b, 0);
+  return ex.map((e) => e / s);
+}
+
+function predictModelStatus(
+  temperature: number,
+  heart_rate: number,
+  spo2: number,
+): { model_status: string; model_confidence: number } {
+  const m = weights.scaler_mean;
+  const s = weights.scaler_scale;
+  const z = [
+    (temperature - m[0]) / s[0],
+    (heart_rate - m[1]) / s[1],
+    (spo2 - m[2]) / s[2],
+  ];
+  const logits = weights.coef.map((row, k) =>
+    row[0] * z[0] + row[1] * z[1] + row[2] * z[2] + weights.intercept[k],
   );
+  const probs = softmax(logits);
+  let best = 0;
+  for (let i = 1; i < probs.length; i++) {
+    if (probs[i] > probs[best]) best = i;
+  }
+  return {
+    model_status: weights.classes[best],
+    model_confidence: probs[best],
+  };
 }
 
-function validate(body: unknown): { ok: true; data: PersistPayload } | { ok: false; error: string } {
-  if (!body || typeof body !== "object") return { ok: false, error: "Body must be JSON object" };
-  const b = body as Record<string, unknown>;
-  if (!isUuid(b.vital_id)) return { ok: false, error: "vital_id must be a UUID" };
-  for (const k of ["model_status", "final_status", "decision_source", "recommendation"]) {
-    if (typeof b[k] !== "string" || !(b[k] as string).length) {
-      return { ok: false, error: `${k} must be a non-empty string` };
-    }
+function predictHybrid(temperature: number, heart_rate: number, spo2: number) {
+  const rule = evaluateHealth(temperature, heart_rate, spo2);
+  const { model_status, model_confidence } = predictModelStatus(
+    temperature,
+    heart_rate,
+    spo2,
+  );
+
+  let final_status: string;
+  let decision_source: string;
+  if (rule.status === "INVALID" || rule.status === "CRITICAL" || rule.status === "ALERT") {
+    final_status = rule.status;
+    decision_source = "rule_override";
+  } else {
+    final_status = model_status;
+    decision_source = "model";
   }
-  if (typeof b.model_confidence !== "number" || Number.isNaN(b.model_confidence)) {
-    return { ok: false, error: "model_confidence must be a number" };
-  }
-  return { ok: true, data: b as unknown as PersistPayload };
+
+  return {
+    input: { temperature, heart_rate, spo2 },
+    rule_status: rule.status,
+    model_status,
+    model_confidence,
+    final_status,
+    decision_source,
+    recommendation: rule.recommendation,
+  };
 }
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
 
-  let body: unknown;
   try {
-    body = await req.json();
-  } catch {
-    return new Response(JSON.stringify({ error: "Invalid JSON" }), {
-      status: 400,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    const url = Deno.env.get("SUPABASE_URL");
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !serviceKey) {
+      return new Response(
+        JSON.stringify({ error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    if (req.method !== "POST") {
+      return new Response(JSON.stringify({ error: "Method not allowed" }), {
+        status: 405,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const body = (await req.json()) as {
+      vital_id?: string;
+      temperature?: number;
+      heart_rate?: number;
+      spo2?: number;
+    };
+
+    const vital_id = body.vital_id;
+    const temperature = body.temperature;
+    const heart_rate = body.heart_rate;
+    const spo2 = body.spo2;
+
+    if (
+      typeof vital_id !== "string" ||
+      typeof temperature !== "number" ||
+      typeof heart_rate !== "number" ||
+      typeof spo2 !== "number"
+    ) {
+      return new Response(
+        JSON.stringify({
+          error: "Expected JSON: { vital_id: string, temperature, heart_rate, spo2: numbers }",
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    const result = predictHybrid(temperature, heart_rate, spo2);
+
+    const supabase = createClient(url, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
     });
-  }
 
-  const v = validate(body);
-  if (!v.ok) {
-    return new Response(JSON.stringify({ error: v.error }), {
-      status: 400,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
-
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!SUPABASE_URL || !SERVICE_ROLE) {
-    return new Response(
-      JSON.stringify({ error: "Backend not configured" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
-  }
-
-  const sb = createClient(SUPABASE_URL, SERVICE_ROLE, {
-    auth: { persistSession: false },
-  });
-
-  const { data, error } = await sb
-    .from("vitals")
-    .update({
-      model_status: v.data.model_status,
-      final_status: v.data.final_status,
-      model_confidence: v.data.model_confidence,
-      decision_source: v.data.decision_source,
-      recommendation: v.data.recommendation,
-      status: v.data.final_status,
+    const updatePayload = {
+      model_status: result.model_status,
+      final_status: result.final_status,
+      model_confidence: result.model_confidence,
+      decision_source: result.decision_source,
+      recommendation: result.recommendation,
+      status: result.final_status,
       model_updated_at: new Date().toISOString(),
-    })
-    .eq("id", v.data.vital_id)
-    .select("id");
+    };
 
-  if (error) {
-    console.error("vitals update failed", error);
-    return new Response(JSON.stringify({ error: error.message }), {
+    const { data, error } = await supabase
+      .from("vitals")
+      .update(updatePayload)
+      .eq("id", vital_id)
+      .select("id");
+
+    if (error) {
+      console.error("Supabase update error:", error);
+      return new Response(JSON.stringify({ error: error.message }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    if (!data?.length) {
+      return new Response(JSON.stringify({ error: `Vital not found: ${vital_id}` }), {
+        status: 404,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response(JSON.stringify({ vital_id, ...result }), {
+      status: 200,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  } catch (e) {
+    console.error(e);
+    const message = e instanceof Error ? e.message : String(e);
+    return new Response(JSON.stringify({ error: message }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
-  if (!data || data.length === 0) {
-    return new Response(
-      JSON.stringify({ error: `Vital not found: ${v.data.vital_id}` }),
-      { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
-  }
-
-  return new Response(JSON.stringify({ ok: true, vital_id: v.data.vital_id }), {
-    status: 200,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
 });
