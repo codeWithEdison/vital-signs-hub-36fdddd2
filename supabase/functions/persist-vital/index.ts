@@ -172,32 +172,61 @@ Deno.serve(async (req) => {
       temperature?: number;
       heart_rate?: number;
       spo2?: number;
+      model_status?: string;
+      final_status?: string;
+      model_confidence?: number;
+      decision_source?: string;
+      recommendation?: string;
     };
 
     const vital_id = body.vital_id;
-    const temperature = body.temperature;
-    const heart_rate = body.heart_rate;
-    const spo2 = body.spo2;
+    if (typeof vital_id !== "string" || vital_id.length === 0) {
+      return new Response(JSON.stringify({ error: "vital_id (string) is required" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
-    if (
-      typeof vital_id !== "string" ||
-      typeof temperature !== "number" ||
-      typeof heart_rate !== "number" ||
-      typeof spo2 !== "number"
-    ) {
+    const supabase = createClient(url, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    const { data: row, error: fetchErr } = await supabase
+      .from("vitals")
+      .select("temperature, heart_rate, spo2")
+      .eq("id", vital_id)
+      .maybeSingle();
+
+    if (fetchErr) {
+      console.error("Supabase fetch error:", fetchErr);
+      return new Response(JSON.stringify({ error: fetchErr.message }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    if (!row) {
+      return new Response(JSON.stringify({ error: `Vital not found: ${vital_id}` }), {
+        status: 404,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const temperature =
+      typeof body.temperature === "number" ? body.temperature : Number(row.temperature);
+    const heart_rate =
+      typeof body.heart_rate === "number" ? body.heart_rate : Number(row.heart_rate);
+    const spo2 = typeof body.spo2 === "number" ? body.spo2 : Number(row.spo2);
+
+    if (![temperature, heart_rate, spo2].every((n) => Number.isFinite(n))) {
       return new Response(
         JSON.stringify({
-          error: "Expected JSON: { vital_id: string, temperature, heart_rate, spo2: numbers }",
+          error: "Could not resolve numeric temperature, heart_rate, and spo2 from request body or database row",
         }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
     const result = predictHybrid(temperature, heart_rate, spo2);
-
-    const supabase = createClient(url, serviceKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
 
     const updatePayload = {
       model_status: result.model_status,

@@ -10,6 +10,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:apis": "node scripts/test-apis.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {
