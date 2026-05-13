@@ -30,10 +30,15 @@ function loadEnv(path) {
   return env;
 }
 
-const env = {
+const fileEnv = {
   ...loadEnv(join(root, ".env")),
   ...loadEnv(join(process.cwd(), ".env")),
 };
+// Allow overrides without editing `.env` (e.g. when default model port is busy).
+const env = { ...fileEnv };
+for (const key of ["VITE_MODEL_API_URL", "VITE_SUPABASE_URL", "VITE_SUPABASE_PUBLISHABLE_KEY"]) {
+  if (process.env[key]) env[key] = process.env[key];
+}
 const MODEL_BASE = (env.VITE_MODEL_API_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 const SUPABASE_URL = (env.VITE_SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_KEY = env.VITE_SUPABASE_PUBLISHABLE_KEY || "";
