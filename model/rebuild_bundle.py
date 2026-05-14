@@ -67,7 +67,7 @@ def main() -> None:
     joblib.dump(payload, out_path)
     print(f"Saved: {out_path}")
     print(f"Source: {data_path.name}")
-    print(f"Accuracy: {payload['meta']['accuracy']:.4f}")
+    print(f"Accuracy (logistic_regression): {payload['meta']['accuracy']:.4f}")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ from health_rules import rule_status_series
 from preprocessing import clean_frame, one_hot_status
 from augmentation import bootstrap_expand
 from analysis_stats import numeric_summary, status_value_counts, group_stats_by_status, correlation_matrix
-from ml_train import train_and_evaluate, FEATURES
+from ml_train import FEATURES, train_and_evaluate, train_model_comparison
 from sample_data import ensure_sample_csv
 
 
@@ -119,17 +119,23 @@ def main() -> None:
         print("\n=== ML skipped (need more rows after cleaning; try --sample-n 500) ===")
         return
 
-    print("\n=== Predictive model: logistic_regression (target = rule_status) ===")
+    print("\n=== Model comparison (same holdout split; Jupyter-style EDA) ===")
+    comp = train_model_comparison(cleaned, target_col="rule_status", random_state=42)
+    for name, payload in comp["results"].items():
+        print(f"\n--- {name} ---")
+        print(
+            f"accuracy={payload['accuracy']:.4f}  macro_f1={payload['macro_f1']:.4f}  "
+            f"alert_recall={payload['alert_recall']:.4f}"
+        )
+
+    print("\n=== Production model: logistic_regression (bundle / API path) ===")
     out = train_and_evaluate(cleaned, target_col="rule_status", random_state=42)
     payload = out["results"]["logistic_regression"]
-    print("\n--- logistic_regression ---")
     print(f"Holdout accuracy: {payload['accuracy']:.4f}")
     print(payload["report"])
-
-    print(f"\nSelected model: logistic_regression ({payload['accuracy']:.4f})")
     print(
-        "\nInterpretation: logistic regression learns decision boundaries from "
-        "(temperature, heart_rate, spo2). Compare coefficients to documented thresholds."
+        f"\nInterpretation: logistic regression learns boundaries from {FEATURES}. "
+        "Other algorithms above are for comparison only."
     )
 
 
